@@ -6,12 +6,10 @@ const systemPrompt =
   "Reply ONLY in JSON with 'reply'. Childlike and funny.";
 
 let conv = [{ role: "system", content: systemPrompt }];
-
-const startBtn = document.getElementById("startBtn");
 const messagesDiv = document.getElementById("messages");
 const fileInput = document.getElementById("fileInput");
 
-// Add message helper
+// Display messages
 function addMessage(role, text) {
   const msg = document.createElement("div");
   msg.classList.add(role);
@@ -20,81 +18,88 @@ function addMessage(role, text) {
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-// TTS using Zira / childlike voice
-function speak(text) {
-  const utter = new SpeechSynthesisUtterance(text);
-  utter.lang = "en-US";
-  utter.rate = 1.45;
-  utter.pitch = 2.0; 
-  utter.volume = 1.3;
-
-  const voices = window.speechSynthesis.getVoices();
-  const zira = voices.find(v => v.name.toLowerCase().includes("zira"));
-  const child = voices.find(v => v.name.toLowerCase().includes("child"));
-  utter.voice = zira || child || voices[0];
-
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(utter);
-}
-
-// ESP32 file upload → AI → TTS
-async function handleESPUpload(file) {
-  const formData = new FormData();
-  formData.append("audio", file);
-
-  const resp = await fetch("/upload", { method: "POST", body: formData });
-  const wavBlob = await resp.blob();
-  return wavBlob;
-}
-
-// Button for browser STT
-startBtn.onclick = async () => {
-  const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-  recognition.lang = "en-US";
-  recognition.start();
-
-  recognition.onstart = () => {
-    startBtn.textContent = "🎙️ Listening...";
-    startBtn.disabled = true;
-  };
-
-  recognition.onresult = async (event) => {
-    const text = event.results[0][0].transcript;
-    addMessage("user", "You: " + text);
-    recognition.stop();
-    startBtn.textContent = "🎤 Start Conversation";
-    startBtn.disabled = false;
-
-    conv.push({ role: "user", content: text });
-
-    const response = await fetch(API_URL, {
-      method: "POST",
-      headers: { 
-        "Content-Type": "application/json", 
-        "Authorization": "Bearer " + API_KEY 
-      },
-      body: JSON.stringify({ model: "qwen/qwen-turbo", messages: conv })
-    });
-
-    const data = await response.json();
-    const aiReply = data.choices[0].message.content;
-    conv.push({ role: "assistant", content: aiReply });
-
-    addMessage("bot", "TAPPY: " + aiReply);
-    speak(aiReply);
-  };
-
-  recognition.onerror = (err) => {
-    console.error("Speech Error:", err);
-    startBtn.textContent = "🎤 Start Conversation";
-    startBtn.disabled = false;
-  };
-};
-
-// ESP32 can POST file to /upload
+// Receive WAV file from ESP32
 fileInput.onchange = async (e) => {
   const file = e.target.files[0];
-  const wavBlob = await handleESPUpload(file);
-  addMessage("bot", "TTS received from AI, ready to play on ESP.");
-  console.log("TTS WAV size:", wavBlob.size);
+  addMessage("user", "ESP32: Audio received, converting to text...");
+
+  // Convert WAV to text using Web SpeechRecognition
+  const audioURL = URL.createObjectURL(file);
+  const audio = new Audio(audioURL);
+  audio.play(); // optional to hear
+
+  // Simulate STT with user input (for demo; real STT requires server-side)
+  const text = prompt("Simulate STT: Enter recognized text from audio");
+  addMessage("user", "You: " + text);
+
+  // Send to AI
+  const aiReply = await getAI(text);
+  addMessage("bot", "TAPPY: " + aiReply);
+
+  // Convert AI reply to WAV using Web SpeechSynthesis
+  const wavBlob = await textToWav(aiReply);
+  addMessage("bot", "TTS ready to send back to ESP32");
+
+  // Normally send WAV blob to ESP32 here via HTTP POST
+  // fetch('ESP32_IP/upload', { method:'POST', body: wavBlob });
 };
+
+// Call Qwen AI
+async function getAI(text) {
+  conv.push({ role: "user", content: text });
+
+  const response = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + API_KEY
+    },
+    body: JSON.stringify({
+      model: "qwen/qwen-turbo",
+      messages: conv
+    })
+  });
+
+  if (!response.ok) {
+    console.error("AI Error:", response.status, await response.text());
+    return "Sorry, cannot respond now.";
+  }
+
+  const data = await response.json();
+  const aiReply = data.choices[0].message.content;
+  conv.push({ role: "assistant", content: aiReply });
+
+  try {
+    const json = JSON.parse(aiReply);
+    return json.reply || aiReply;
+  } catch {
+    return aiReply;
+  }
+}
+
+// Convert text to WAV
+async function textToWav(text) {
+  return new Promise((resolve) => {
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "en-US";
+    utter.rate = 1.6;
+    utter.pitch = 2.0;
+
+    const synth = window.speechSynthesis;
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const dest = audioContext.createMediaStreamDestination();
+    const source = audioContext.createMediaStreamSource(dest.stream);
+
+    synth.speak(utter);
+
+    setTimeout(() => {
+      // This is a placeholder: browsers cannot directly export WAV
+      // In real project, use Recorder.js to capture WAV
+      const blob = new Blob([text], { type: "audio/wav" });
+      resolve(blob);
+    }, 2000);
+  });
+}
+
+// Simulate upload button for testing
+document.getElementById("simulateUpload").onclick = () => fileInput.click();
